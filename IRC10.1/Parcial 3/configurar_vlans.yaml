@@ -1,0 +1,212 @@
+---
+- name: 2960 - AAA + SSH + VLANs sin perder conectividad (Gi0/1 y Fa0/1 en VLAN1)
+  hosts: switches
+  gather_facts: no
+  vars:
+    ansible_command_timeout: 180
+    apply_trunk: false   # act  valo con: -e "apply_trunk=true"
+
+  tasks:
+    # ========================
+    #   ACCESO / AAA / SSH
+    # ========================
+    - name: AAA + usuario admin + enable
+      cisco.ios.ios_config:
+        lines:
+          - aaa new-model
+          - aaa authentication login default local
+          - aaa authentication login VTY_LIST local
+          - aaa authorization exec default local
+          - username admin privilege 15 secret cisco123
+          - enable secret cisco123
+
+    - name: Dominio y SSH v2
+      cisco.ios.ios_config:
+        lines:
+          - ip domain-name midominio.local
+          - ip ssh version 2
+
+    - name: SVI de gesti  n en VLAN1 (mantener)
+      cisco.ios.ios_config:
+        parents: interface Vlan1
+        lines:
+          - ip address 192.168.4.200 255.255.255.0
+          - no shutdown
+
+    - name: Default gateway hacia el m  dem
+      cisco.ios.ios_config:
+        lines:
+          - ip default-gateway 192.168.4.1
+
+    - name: Claves RSA si no existen (ignorar si ya hay)
+      cisco.ios.ios_command:
+        commands:
+          - crypto key generate rsa modulus 1024
+      failed_when: false
+
+    # ====== VTY / Consola con AAA ======
+    - name: VTY 0-4 con AAA (usar lista VTY_LIST)
+      cisco.ios.ios_config:
+        parents: line vty 0 4
+        lines:
+          - login authentication VTY_LIST
+          - transport input ssh
+
+    - name: VTY 5-15 con AAA (usar lista VTY_LIST)
+      cisco.ios.ios_config:
+        parents: line vty 5 15
+        lines:
+          - login authentication VTY_LIST
+          - transport input ssh
+
+    - name: Consola usando AAA
+      cisco.ios.ios_config:
+        parents: line console 0
+        lines:
+          - login authentication VTY_LIST
+          - exec-timeout 10 0
+          - logging synchronous
+
+    # ========================
+    #   IDENTIDAD / HOSTNAME
+    # ========================
+    - name: Establecer hostname
+      cisco.ios.ios_config:
+        lines:
+          - hostname Chotis-SW
+
+    # ==================================================
+    #   PROTEGER PUERTOS CR ^mTICOS (NO CORTAR CONECTIV.)
+    # ==================================================
+    - name: Asegurar Gi0/1 sigue en VLAN1 (uplink m  dem)
+      cisco.ios.ios_config:
+        parents: interface GigabitEthernet0/1
+        lines:
+          - switchport mode access
+          - switchport access vlan 1
+          - spanning-tree portfast
+          - no shutdown
+
+    - name: Asegurar Fa0/1 sigue en VLAN1 (tu laptop actual)
+      cisco.ios.ios_config:
+        parents: interface FastEthernet0/1
+        lines:
+          - switchport mode access
+          - switchport access vlan 1
+          - spanning-tree portfast
+          - no shutdown
+
+    # ========== VLANs ==========
+    - name: Crear VLAN 10 (ventas)
+      cisco.ios.ios_config:
+        lines:
+          - vlan 10
+          - name ventas
+
+    - name: Crear VLAN 20 (administracion)
+      cisco.ios.ios_config:
+        lines:
+          - vlan 20
+          - name administracion
+
+    # ===== PUERTOS (UNO POR UNO) =====
+    - name: Preparar Fa0/6 en VLAN10 (puerto de pruebas)
+      cisco.ios.ios_config:
+        parents: interface FastEthernet0/6
+        lines:
+          - switchport mode access
+          - switchport access vlan 10
+          - spanning-tree portfast
+          - no shutdown
+
+    - name: Fa0/2 a VLAN10
+      cisco.ios.ios_config:
+        parents: interface FastEthernet0/2
+        lines:
+          - switchport mode access
+          - switchport access vlan 10
+          - spanning-tree portfast
+          - no shutdown
+
+    - name: Fa0/3 a VLAN20
+      cisco.ios.ios_config:
+        parents: interface FastEthernet0/3
+        lines:
+          - switchport mode access
+          - switchport access vlan 20
+          - spanning-tree portfast
+          - no shutdown
+
+    - name: Fa0/4 a VLAN20
+      cisco.ios.ios_config:
+        parents: interface FastEthernet0/4
+        lines:
+          - switchport mode access
+          - switchport access vlan 20
+          - spanning-tree portfast
+          - no shutdown
+
+    # ===== (OPCIONAL) TRUNK A SOPHOS =====
+    - name: Trunk Fa0/24 a Sophos (activable por variable)
+      cisco.ios.ios_config:
+        parents: interface FastEthernet0/24
+        lines:
+          - switchport mode trunk
+          - switchport trunk allowed vlan all
+          - no shutdown
+      when: apply_trunk | default(false) | bool
+
+    # ===== BANNERS (MOTD / LOGIN / EXEC) =====
+    - name: Quitar banners previos
+      cisco.ios.ios_config:
+        lines:
+          - no banner motd
+          - no banner login
+          - no banner exec
+      failed_when: false
+
+    - name: Configurar banner LOGIN
+      cisco.ios.ios_banner:
+        banner: login
+        text: |
+          ****************************************************
+          * ADVERTENCIA: Acceso autorizado unicamente para   *
+          * personal autorizado. Toda actividad sera         *
+          * monitoreada y registrada.                        *
+          ****************************************************
+        state: present
+
+    - name: Configurar banner EXEC
+      cisco.ios.ios_banner:
+        banner: exec
+        text: |
+          ****************************************************
+          * ADVERTENCIA: Acceso autorizado unicamente para   *
+          * personal autorizado. Toda actividad sera         *
+          * monitoreada y registrada..                       *
+          ****************************************************
+        state: present
+
+    # ===== VALIDACI ^sN / GUARDAR =====
+    - name: Guardar configuraci  n
+      cisco.ios.ios_command:
+        commands:
+          - write memory
+
+    - name: Validar estado final
+      cisco.ios.ios_command:
+        commands:
+          - terminal length 0
+          - show vlan brief
+          - show running-config | section interface FastEthernet0/1|FastEthernet0/2|FastEthernet0/3|FastEthernet0/4|FastEthernet0/6|FastEthernet0/24|GigabitEther>
+          - show running-config | include ^hostname|^ip default-gateway|^banner
+          - show banner motd
+          - show banner login
+          - show banner exec
+          - show running-config | section line con 0
+          - show running-config | section line vty
+      register: valida
+
+    - name: Mostrar validaciones
+      debug:
+        var: valida.stdout_lines
